@@ -211,6 +211,7 @@ const Index = () => {
         <ShoppingPage
           items={store.shoppingList}
           language={store.language}
+          onPurchase={store.purchaseShoppingItem}
           onToggle={store.toggleShoppingItem}
           onAdd={store.addShoppingItem}
           onRemove={store.removeShoppingItem}
