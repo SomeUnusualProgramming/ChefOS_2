@@ -2,7 +2,9 @@ import { Language, AISuggestion, Meal, ShoppingItem, FridgeItem } from '@/types/
 import { useTranslation } from '@/hooks/useTranslation';
 import SuggestionCard from './SuggestionCard';
 import ChatInput from './ChatInput';
+import ProposedActions from './ProposedActions';
 import { Flame, ShoppingCart, Refrigerator } from 'lucide-react';
+import type { AIAction, ProposedAction } from './ChatInput';
 
 interface DashboardProps {
   language: Language;
@@ -10,14 +12,20 @@ interface DashboardProps {
   meals: Meal[];
   shoppingList: ShoppingItem[];
   fridge: FridgeItem[];
+  proposedActions: ProposedAction[];
   onDismissSuggestion: (id: string) => void;
-  onAddFridgeItems: (items: FridgeItem[]) => void;
+  onAIAction: (action: AIAction) => void;
   onNavigate: (page: string) => void;
+  onApproveAction: (action: ProposedAction) => void;
+  onDismissAction: (actionId: string) => void;
+  onApproveAllActions: () => void;
+  onDismissAllActions: () => void;
 }
 
 export default function Dashboard({
-  language, suggestions, meals, shoppingList, fridge,
-  onDismissSuggestion, onAddFridgeItems, onNavigate,
+  language, suggestions, meals, shoppingList, fridge, proposedActions,
+  onDismissSuggestion, onAIAction, onNavigate, onApproveAction,
+  onDismissAction, onApproveAllActions, onDismissAllActions,
 }: DashboardProps) {
   const { t } = useTranslation(language);
 
@@ -40,7 +48,20 @@ export default function Dashboard({
       </div>
 
       {/* Chat / voice input */}
-      <ChatInput language={language} onAddFridgeItems={onAddFridgeItems} />
+      <ChatInput language={language} onAIAction={onAIAction} fridge={fridge} meals={meals} shoppingList={shoppingList} />
+
+      {/* Proposed Actions from AI */}
+      <ProposedActions
+        actions={proposedActions}
+        onApprove={onApproveAction}
+        onDismiss={onDismissAction}
+        onApproveAll={onApproveAllActions}
+        onDismissAll={onDismissAllActions}
+        approveLabel={t('common.approve') || 'Tak'}
+        dismissLabel={t('common.dismiss') || 'Nie'}
+        approveAllLabel={t('common.approveAll') || 'Wszystkie'}
+        dismissAllLabel={t('common.dismissAll') || 'Odrzuć wszystkie'}
+      />
 
       {/* Quick stats */}
       <div className="grid grid-cols-3 gap-2 mb-5">
