@@ -2,9 +2,9 @@ import { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { Language, FridgeItem, Meal, ShoppingItem } from '@/types/chefos';
+import { API_BASE_URL } from '@/config/api';
 import { Mic, MicOff, Send, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { parseAndValidateProduct, isSuspiciousProductName } from '@/data/productDatabase';
 
 export interface ProposedAction {
   id: string;
@@ -26,465 +26,20 @@ interface ChatInputProps {
   fridge: FridgeItem[];
   meals: Meal[];
   shoppingList: ShoppingItem[];
-  onAddFridgeItems?: (items: FridgeItem[]) => void;
 }
 
-// Check if text looks like a valid product name (has vowels, reasonable length)
-function looksLikeValidProduct(text: string): boolean {
-  if (text.length < 3 || text.length > 50) return false;
-  // Must contain at least one vowel (real words have vowels)
-  const hasVowel = /[aeiouyąęóśłżźćń]/i.test(text);
-  // Should not be just consonants or random letters
-  const consonantRatio = (text.match(/[bcdfghjklmnpqrstvwxz]/gi) || []).length / text.length;
-  return hasVowel && consonantRatio < 0.8;
-}
-
-// New validation-based parser for extracting fridge items from natural language
-function parseFridgeItemsFromTextWithValidation(
-  text: string,
-  language: 'en' | 'pl' | 'es' | 'de' = 'pl'
-): ParsedProduct[] {
-  const products: ParsedProduct[] = [];
-
-  // Split by common separators
-  const lines = text.split(/[,\.\n;]+/).map(s => s.trim()).filter(s => s.length > 0);
-
-  for (const line of lines) {
-    if (line.length < 2) continue;
-
-    // Skip lines that are clearly commands or don't look like products
-    const suspiciousCheck = isSuspiciousProductName(line);
-    if (!suspiciousCheck.isValid) {
-      // Try to extract product name from command-like text
-      const cleaned = line
-        .replace(/\b(dodaj|do|lodówki|lodowki|fridge|add|to)\b/gi, '')
-        .replace(/\b(usuń|usun|z|listy|remove|from|list)\b/gi, '')
-        .trim();
-
-      if (cleaned.length >= 2) {
-        const validated = parseAndValidateProduct(cleaned, language);
-        if (!validated.needsReview || validated.confidence > 0.5) {
-          products.push(validated);
-        }
-      }
-      continue;
-    }
-
-    // Validate and get product info
-    const validated = parseAndValidateProduct(line, language);
-    products.push(validated);
-  }
-
-  return products;
-}
-
-// AI parser for extracting fridge items from natural language
-function parseFridgeItemsFromText(text: string): FridgeItem[] {
-  const items: FridgeItem[] = [];
-  const now = new Date();
-  
-  // Common patterns for quantities and units
-  const patterns = [
-    // "2 kg chicken", "500g beef", "3 eggs"
-    /(\d+(?:\.\d+)?)\s*(kg|g|grams?|ml|l|liters?|pcs?|pieces?|packs?|bottles?|jars?|cans?)?\s+(?:of\s+)?([\w\s]+)/gi,
-    // "chicken 2kg", "milk 1l"
-    /([\w\s]+?)\s+(\d+(?:\.\d+)?)\s*(kg|g|grams?|ml|l|liters?|pcs?|pieces?|packs?|bottles?|jars?|cans?)/gi,
-    // Simple comma separated items
-    /([^,]+)/g
-  ];
-
-  const lines = text.split(/[,.\n]+/).map(s => s.trim()).filter(s => s.length > 0);
-  
-  for (const line of lines) {
-    if (line.length < 2) continue;
-
-    let quantity = 1;
-    let unit = 'pcs';
-    let productName = line.toLowerCase()
-      .replace(/\d+\s*(kg|g|ml|l|pieces?|pcs?|packs?|bottles?|jars?|cans?)/gi, '')
-      .replace(/(kg|g|ml|l|pieces?|pcs?|packs?|bottles?|jars?|cans?)\s*\d+/gi, '')
-      .replace(/\d+/g, '')
-      .replace(/\b(of|some|a few|few|little|bit of)\b/gi, '')
-      .trim();
-
-    // Extract quantity
-    const qtyMatch = line.match(/(\d+(?:\.\d+)?)/);
-    if (qtyMatch) {
-      quantity = parseFloat(qtyMatch[1]);
-    }
-
-    // Extract unit
-    const unitMatch = line.match(/\b(kg|g|grams?|ml|l|liters?|pcs?|pieces?|packs?|bottles?|jars?|cans?)\b/i);
-    if (unitMatch) {
-      unit = unitMatch[1].toLowerCase();
-      if (unit === 'g' || unit === 'gram' || unit === 'grams') unit = 'g';
-      if (unit === 'kg') unit = 'kg';
-      if (unit === 'ml') unit = 'ml';
-      if (unit === 'l' || unit === 'liter' || unit === 'liters') unit = 'l';
-      if (unit === 'piece' || unit === 'pieces' || unit === 'pc' || unit === 'pcs') unit = 'pcs';
-      if (unit === 'pack' || unit === 'packs') unit = 'pack';
-      if (unit === 'bottle' || unit === 'bottles') unit = 'bottle';
-      if (unit === 'jar' || unit === 'jars') unit = 'jar';
-      if (unit === 'can' || unit === 'cans') unit = 'can';
-    }
-
-    // Clean up product name
-    productName = productName
-      .split(' ')
-      .filter(w => w.length > 0 && !w.match(/^(of|and|with|some|the|a|an)$/i))
-      .join(' ')
-      .trim();
-
-    // Validate product name looks like a real word
-    if (looksLikeValidProduct(productName)) {
-      // Estimate expiration based on product type
-      let daysUntilExpiry = 7;
-      const perishables = ['milk', 'chicken', 'meat', 'beef', 'pork', 'fish', 'yogurt', 'cream', 'cheese'];
-      const semiPerishables = ['eggs', 'butter', 'ham', 'sausage', 'bacon'];
-      const fresh = ['tomato', 'lettuce', 'spinach', 'mushroom', 'berry', 'berries', 'strawberry'];
-      const longLasting = ['rice', 'pasta', 'flour', 'sugar', 'salt', 'oil', 'vinegar', 'sauce', 'honey'];
-      
-      const lowerName = productName.toLowerCase();
-      if (perishables.some(p => lowerName.includes(p))) daysUntilExpiry = 3;
-      else if (semiPerishables.some(p => lowerName.includes(p))) daysUntilExpiry = 14;
-      else if (fresh.some(p => lowerName.includes(p))) daysUntilExpiry = 5;
-      else if (longLasting.some(p => lowerName.includes(p))) daysUntilExpiry = 365;
-
-      const expiryDate = new Date(now);
-      expiryDate.setDate(expiryDate.getDate() + daysUntilExpiry);
-
-      items.push({
-        id: `fridge-${Date.now()}-${items.length}`,
-        product_name: productName.charAt(0).toUpperCase() + productName.slice(1),
-        quantity,
-        unit,
-        expiration_date: expiryDate.toISOString().split('T')[0],
-        added_date: now.toISOString().split('T')[0],
-      });
-    }
-  }
-
-  return items;
-}
-
-// Extract quantity from text
-function extractQuantity(text: string): { quantity: number; unit: string; cleanText: string } {
-  let quantity = 1;
-  let unit = 'pcs';
-  let cleanText = text;
-
-  const qtyMatch = text.match(/(\d+(?:\.\d+)?)\s*(kg|g|grams?|ml|l|liters?|pcs?|pieces?|packs?|bottles?|jars?|cans?|szt|porcji|gram|litry?)?/i);
-  if (qtyMatch) {
-    quantity = parseFloat(qtyMatch[1]);
-    if (qtyMatch[2]) {
-      unit = qtyMatch[2].toLowerCase();
-      if (unit === 'g' || unit === 'gram' || unit === 'grams') unit = 'g';
-      if (unit === 'kg') unit = 'kg';
-      if (unit === 'ml') unit = 'ml';
-      if (unit === 'l' || unit === 'liters' || unit === 'litry') unit = 'l';
-      if (unit === 'piece' || unit === 'pieces' || unit === 'pc' || unit === 'pcs' || unit === 'szt') unit = 'pcs';
-      if (unit === 'pack' || unit === 'packs') unit = 'pack';
-      if (unit === 'bottle' || unit === 'bottles') unit = 'bottle';
-      if (unit === 'jar' || unit === 'jars') unit = 'jar';
-      if (unit === 'can' || unit === 'cans') unit = 'can';
-      if (unit === 'porcji') unit = 'portion';
-    }
-    cleanText = text.replace(qtyMatch[0], '').trim();
-  }
-
-  cleanText = cleanText
-    .replace(/\b(of|some|a few|few|little|bit of|kilogram|kilograms)\b/gi, '')
-    .replace(/\d+/g, '')
-    .trim();
-
-  return { quantity, unit, cleanText };
-}
-
-// Parse meal from text
-function parseMealFromText(text: string, existingMeals: Meal[]): Meal | null {
-  const now = new Date();
-  const todayStr = now.toISOString().split('T')[0];
-
-  let mealType: Meal['meal_type'] = 'lunch';
-  const lowerText = text.toLowerCase();
-
-  if (lowerText.match(/\b(sniadanie|śniadanie|breakfast|rano|poranek)\b/)) mealType = 'breakfast';
-  else if (lowerText.match(/\b(lunch|obiad|dinner|kolacja|wieczorem)\b/)) mealType = 'dinner';
-  else if (lowerText.match(/\b(przekąska|snack|przekaska)\b/)) mealType = 'snack';
-  else if (lowerText.match(/\b(lunch|drugie śniadanie|drugie sniadanie)\b/)) mealType = 'lunch';
-
-  let mealName = text
-    .replace(/\b(dodaj|dodajcie|add|chcę|chce|zjeść|zjesc|na|dziś|dzis|dzisiaj|jutro|obiad|śniadanie|sniadanie|kolacja|lunch|przekąska|przekaska|snack|breakfast|dinner|lunch)\b/gi, '')
-    .replace(/\d+\s*(kcal|kalorii|g|gram|protein|carbs|fat)/gi, '')
-    .trim();
-
-  const quotedMatch = text.match(/["']([^"']+)["']/);
-  if (quotedMatch) mealName = quotedMatch[1];
-
-  if (!mealName || !looksLikeValidProduct(mealName)) return null;
-
-  let calories = 400;
-  const calMatch = text.match(/(\d+)\s*(kcal|kalorii|cal)/i);
-  if (calMatch) calories = parseInt(calMatch[1]);
-
-  const ingredients: { product_name: string; quantity: number; unit: string }[] = [];
-  const ingredientPatterns = [
-    /z\s+([\w\s,]+)/i,
-    /with\s+([\w\s,]+)/i,
-    /składniki[:\s]+([\w\s,]+)/i,
-    /ingredients[:\s]+([\w\s,]+)/i,
-  ];
-
-  for (const pattern of ingredientPatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      const parts = match[1].split(/[,\si]+/).filter(p => p.length > 2);
-      parts.forEach(part => {
-        ingredients.push({ product_name: part.trim(), quantity: 1, unit: 'portion' });
-      });
-      break;
-    }
-  }
-
-  return {
-    id: `meal-${Date.now()}`,
-    day: todayStr,
-    meal_type: mealType,
-    name: mealName.charAt(0).toUpperCase() + mealName.slice(1),
-    products: ingredients.length > 0 ? ingredients : [{ product_name: 'Generic ingredients', quantity: 1, unit: 'portion' }],
-    calories,
-    macros: { protein: Math.round(calories * 0.25 / 4), carbs: Math.round(calories * 0.5 / 4), fat: Math.round(calories * 0.25 / 9) },
-  };
-}
-
-// Parse shopping item from text
-function parseShoppingItemFromText(text: string): ShoppingItem | null {
-  const { quantity, unit, cleanText } = extractQuantity(text);
-
-  let productName = cleanText
-    .replace(/\b(kup|kupić|dodaj|do|listy|zakupów|shopping|list|lista|kupie)\b/gi, '')
-    .trim();
-
-  if (!productName || !looksLikeValidProduct(productName)) return null;
-
-  return {
-    id: `shopping-${Date.now()}`,
-    product_name: productName.charAt(0).toUpperCase() + productName.slice(1),
-    quantity,
-    unit,
-    purchased: false,
-  };
-}
-
-// Main parser - analyzes user intent and PROPOSES actions (does NOT execute)
-function parseUserIntent(text: string, fridge: FridgeItem[], meals: Meal[], shoppingList: ShoppingItem[]): AIAction {
-  const lowerText = text.toLowerCase();
-  const proposedActions: ProposedAction[] = [];
-  const now = new Date();
-  const todayStr = now.toISOString().split('T')[0];
-
-  // Helper to generate unique IDs
-  const generateId = (prefix: string, index: number) => `${prefix}-${Date.now()}-${index}`;
-
-  // === INTENTION: EXPLICIT FRIDGE ADD ===
-  const explicitFridgeKeywords = /\b(dodaj|dodajcie|mam|kupiłem|kupiłam|wpisz|wloz|włóż|wlozylam|wlozylem|dodac|dodać|add|bought|got|purchased|have|włożyłem|włożyłam)\b.*\b(do lodówki|do lodowki|lodówkę|lodowke|lodówki|lodowki|fridge|refrigerator)\b/;
-  if (explicitFridgeKeywords.test(lowerText)) {
-    const items = parseFridgeItemsFromText(text);
-    items.forEach((item, idx) => {
-      proposedActions.push({
-        id: generateId('propose-fridge', idx),
-        type: 'fridge_add',
-        data: item,
-        description: `Dodać "${item.product_name}" (${item.quantity} ${item.unit}) do lodówki`,
-        icon: 'fridge'
-      });
-    });
-  }
-
-  // === INTENTION: EXPLICIT SHOPPING ADD ===
-  const explicitShoppingKeywords = /\b(dodaj|dodajcie|wpisz|włóż|wloz|kup|kupić|kupic|buy|add|put|potrzebuję|potrzebuje|potrzebujemy|need|need to buy|idę do sklepu|ide do sklepu|w sklepie|zakupy)\b/;
-  if (explicitShoppingKeywords.test(lowerText)) {
-    // Extract products from shopping context
-    const shoppingPatterns = [
-      /(\d+(?:\.\d+)?)\s*(kg|g|szt|porcji|litry?)?\s+(?:wołowin[ęy]|kurczaka|ryżu|makaronu|mleka|chleba|jaj(?:ek|ka)|warzyw|owoców|mięsa|ryby)/gi,
-      /(?:kupić|kupie|kup|chcę|chce)\s+(?:sobie\s+)?(.+?)(?:\s+(?:na|do|w|z)\s+|$)/i,
-    ];
-
-    const shoppingItems: ShoppingItem[] = [];
-
-    // Look for "chcę na obiad wołowinę" pattern - extract the meal ingredient
-    const mealIngredientMatch = lowerText.match(/(?:chcę|chce|zjem|zjeść|zjesc|na\s+(?:obiad|kolację|sniadanie|lunch))\s+(.+?)(?:\s+(?:z|na|do|i|a)\s+|$)/i);
-    if (mealIngredientMatch && !explicitFridgeKeywords.test(lowerText)) {
-      const ingredientText = mealIngredientMatch[1].trim();
-      // Check if it's a valid product name
-      if (looksLikeValidProduct(ingredientText) && ingredientText.length > 2) {
-        const { quantity, unit, cleanText } = extractQuantity(ingredientText);
-        const cleanProduct = cleanText
-          .replace(/\b(chcę|chce|na|dziś|dzis|dzisiaj|jutro|obiad|kolację|kolacje|sniadanie|lunch|zjeść|zjesc)\b/gi, '')
-          .trim();
-        if (cleanProduct && looksLikeValidProduct(cleanProduct)) {
-          shoppingItems.push({
-            id: generateId('shopping', 0),
-            product_name: cleanProduct.charAt(0).toUpperCase() + cleanProduct.slice(1),
-            quantity: quantity,
-            unit: unit,
-            purchased: false,
-          });
-        }
-      }
-    }
-
-    // Parse remaining text for shopping items
-    const lines = text.split(/[,\.\n;]+/).map(s => s.trim()).filter(s => s.length > 2);
-    for (const line of lines) {
-      const item = parseShoppingItemFromText(line);
-      if (item && !shoppingItems.some(si => si.product_name.toLowerCase() === item.product_name.toLowerCase())) {
-        shoppingItems.push(item);
-      }
-    }
-
-    shoppingItems.forEach((item, idx) => {
-      proposedActions.push({
-        id: generateId('propose-shopping', idx),
-        type: 'shopping_add',
-        data: item,
-        description: `Dodać "${item.product_name}" (${item.quantity} ${item.unit}) do listy zakupów`,
-        icon: 'shopping'
-      });
-    });
-
-    // If shopping items detected and no explicit fridge add, also propose meal planning
-    if (shoppingItems.length > 0) {
-      const mealTypeMatch = lowerText.match(/\b(obiad|kolacja|kolację|sniadanie|śniadanie|lunch|przekąska)\b/);
-      const mealType: Meal['meal_type'] = mealTypeMatch
-        ? mealTypeMatch[1].includes('śniadanie') || mealTypeMatch[1].includes('sniadanie') ? 'breakfast'
-        : mealTypeMatch[1].includes('lunch') ? 'lunch'
-        : mealTypeMatch[1].includes('kolacja') || mealTypeMatch[1].includes('kolacj') ? 'dinner'
-        : mealTypeMatch[1].includes('przekąska') ? 'snack'
-        : 'dinner'
-        : 'dinner';
-
-      const mainIngredient = shoppingItems[0];
-      const mealName = `${mainIngredient.product_name} na ${mealType === 'breakfast' ? 'śniadanie' : mealType === 'lunch' ? 'lunch' : mealType === 'dinner' ? 'kolację' : 'przekąskę'}`;
-
-      proposedActions.push({
-        id: generateId('propose-meal', 0),
-        type: 'meal_add',
-        data: {
-          id: generateId('meal', 0),
-          day: todayStr,
-          meal_type: mealType,
-          name: mealName,
-          products: shoppingItems.map(si => ({ product_name: si.product_name, quantity: si.quantity, unit: si.unit })),
-          calories: 500,
-          macros: { protein: 30, carbs: 50, fat: 20 }
-        } as Meal,
-        description: `Zaplanować "${mealName}"`,
-        icon: 'meal'
-      });
-    }
-  }
-
-  // === INTENTION: MEAL PLANNING (without shopping) ===
-  const mealKeywords = /\b(zaplanuj|zrob|zrób|plan|schedule|make|create|chcę zjeść|chce zjesc|jem|obiad|kolacja|śniadanie|sniadanie)\b/;
-  if (mealKeywords.test(lowerText) && proposedActions.length === 0) {
-    const meal = parseMealFromText(text, meals);
-    if (meal) {
-      proposedActions.push({
-        id: generateId('propose-meal', 0),
-        type: 'meal_add',
-        data: meal,
-        description: `Zaplanować posiłek: "${meal.name}" (${meal.meal_type}, ${meal.calories} kcal)`,
-        icon: 'meal'
-      });
-    }
-  }
-
-  // === INTENTION: MEAL REMOVE ===
-  const removeMealKeywords = /\b(usuń|usun|odwołaj|odwolaj|cancel|remove|delete|nie chcę|nie chce|rezygnuję|skip)\b.*\b(posiłek|posilek|obiad|kolacji|meal)\b/;
-  if (removeMealKeywords.test(lowerText)) {
-    const mealMatch = lowerText.match(/(?:usuń|usun|odwołaj|odwolaj|cancel|remove|nie chcę|nie chce|skip)\s+(?:z\s+planu\s+)?(?:posiłku|posilku|obiadu|obiad|kolacji|kolacja|meal\s+)?["']?(.+?)["']?$/i);
-    if (mealMatch) {
-      const mealName = mealMatch[1].trim().toLowerCase();
-      const matchingMeal = meals.find(m => m.name.toLowerCase().includes(mealName) || mealName.includes(m.name.toLowerCase()));
-      if (matchingMeal) {
-        proposedActions.push({
-          id: generateId('propose-remove-meal', 0),
-          type: 'meal_remove',
-          data: { mealId: matchingMeal.id },
-          description: `Usunąć z planu: "${matchingMeal.name}"`,
-          icon: 'meal'
-        });
-      }
-    }
-  }
-
-  // === INTENTION: REMOVE FROM SHOPPING LIST ===
-  const removeShoppingKeywords = /\b(kupiłem|kupilem|kupiłam|kupilam|mam już|mam juz|already have|bought|got|skreśl|skresl)\b/;
-  if (removeShoppingKeywords.test(lowerText)) {
-    const productMatch = lowerText.match(/(?:kupiłem|kupilem|kupiłam|kupilam|mam już|mam juz|already have|bought|got)\s+(?:już\s+)?["']?(.+?)["']?$/i);
-    if (productMatch) {
-      const productName = productMatch[1].trim().toLowerCase();
-      const matchingItem = shoppingList.find(s => s.product_name.toLowerCase().includes(productName) || productName.includes(s.product_name.toLowerCase()));
-      if (matchingItem) {
-        proposedActions.push({
-          id: generateId('propose-remove-shopping', 0),
-          type: 'shopping_remove',
-          data: { itemId: matchingItem.id },
-          description: `Usunąć z listy zakupów: "${matchingItem.product_name}"`,
-          icon: 'shopping'
-        });
-      }
-    }
-  }
-
-  // === DEFAULT: If no explicit intent but text contains valid products, propose shopping ===
-  if (proposedActions.length === 0) {
-    const items = parseFridgeItemsFromText(text);
-    if (items.length > 0) {
-      // Ask user what they want to do with these items
-      items.forEach((item, idx) => {
-        proposedActions.push({
-          id: generateId('propose-shopping', idx),
-          type: 'shopping_add',
-          data: {
-            id: generateId('shopping', idx),
-            product_name: item.product_name,
-            quantity: item.quantity,
-            unit: item.unit,
-            purchased: false
-          } as ShoppingItem,
-          description: `Dodać "${item.product_name}" (${item.quantity} ${item.unit}) do listy zakupów`,
-          icon: 'shopping'
-        });
-      });
-    }
-  }
-
-  // Return proposals if any found
-  if (proposedActions.length > 0) {
-    return {
-      type: 'propose',
-      data: proposedActions,
-      message: `Znaleziono ${proposedActions.length} propozycji. Wybierz, które chcesz zatwierdzić:`
-    };
-  }
-
-  return { type: 'unknown', message: 'Nie rozumiem. Spróbuj: "Idę do sklepu, chcę kupić wołowinę na obiad" lub "Zaplanuj obiad z kurczakiem"' };
-}
-
-export default function ChatInput({ language, onAIAction, fridge, meals, shoppingList, onAddFridgeItems }: ChatInputProps) {
+export default function ChatInput({ language, onAIAction, fridge, meals, shoppingList }: ChatInputProps) {
   const { t } = useTranslation(language);
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const { 
-    isListening, 
-    transcript, 
-    startListening, 
-    stopListening, 
+  const {
+    isListening,
+    transcript,
+    startListening,
+    stopListening,
     resetTranscript,
     isSupported,
-    error 
+    error,
   } = useSpeechRecognition(language === 'pl' ? 'pl-PL' : language === 'es' ? 'es-ES' : language === 'de' ? 'de-DE' : 'en-US');
 
   const handleToggleListening = useCallback(() => {
@@ -496,10 +51,9 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
     }
   }, [isListening, startListening, stopListening, t]);
 
-  // Handle transcript updates in useEffect instead of during render
   useEffect(() => {
     if (transcript && !isListening) {
-      setInputText(prev => prev ? `${prev} ${transcript}`.trim() : transcript);
+      setInputText(prev => (prev ? `${prev} ${transcript}`.trim() : transcript));
       resetTranscript();
     }
   }, [transcript, isListening, resetTranscript]);
@@ -509,62 +63,47 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
 
     setIsProcessing(true);
 
-    // Check if this is a fridge add command
-    const lowerText = inputText.toLowerCase();
-    const isFridgeAdd = /\b(dodaj|dodajcie|mam|kupiłem|kupiłam|wpisz|wloz|włóż|wlozylam|wlozylem|dodac|dodać|add|bought|got|purchased|have|włożyłem|włożyłam)\b.*\b(do lodówki|do lodowki|lodówkę|lodowke|lodówki|lodowki|fridge|refrigerator)\b/.test(lowerText);
-
-    if (isFridgeAdd && onAddFridgeItems) {
-      // Parse and add products directly without review
-      const validatedProducts = parseFridgeItemsFromTextWithValidation(inputText, language as 'en' | 'pl' | 'es' | 'de');
-
-      // Filter out products that failed validation completely
-      const validProducts = validatedProducts.filter(p => p.confidence > 0.3);
-
-      if (validProducts.length === 0) {
-        toast.error('Nie rozpoznano żadnych produktów. Spróbuj użyć wyraźniejszych nazw.');
-        setIsProcessing(false);
-        return;
-      }
-
-      // Add all products directly without review panel
-      const now = new Date();
-      const items: FridgeItem[] = validProducts.map((product, index) => {
-        const expiryDate = new Date(now);
-        expiryDate.setDate(expiryDate.getDate() + product.shelfLifeDays);
-
-        return {
-          id: `fridge-${Date.now()}-${index}`,
-          product_name: product.suggestedNamePl.charAt(0).toUpperCase() + product.suggestedNamePl.slice(1),
-          quantity: 1,
-          unit: 'pcs',
-          expiration_date: expiryDate.toISOString().split('T')[0],
-          added_date: now.toISOString().split('T')[0],
-          category: product.category,
-        };
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/agents/chat-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: inputText,
+          language,
+          fridge,
+          meals,
+          shoppingList,
+        }),
       });
 
-      onAddFridgeItems(items);
-      toast.success(`Dodano ${items.length} produktów do lodówki`);
-      setInputText('');
+      if (!response.ok) {
+        if (response.status === 503 || response.status === 502) {
+          throw new Error('Backend AI unavailable - check if docker is running');
+        }
+        throw new Error('Backend AI request failed');
+      }
+
+      const action = (await response.json()) as AIAction;
+
+      if (action.type !== 'unknown') {
+        onAIAction(action);
+        toast.success(action.message);
+        setInputText('');
+      } else {
+        toast.error(action.message || 'Nie rozumiem polecenia. Spróbuj inaczej.');
+      }
+    } catch (e) {
+      console.error(e);
+      const errorMsg = e instanceof Error ? e.message : '';
+      if (errorMsg.includes('Backend AI unavailable') || errorMsg.includes('Failed to fetch')) {
+        toast.error('Nie udało się połączyć z backendem AI. Upewnij się że backend działa: docker-compose up -d');
+      } else {
+        toast.error('Błąd podczas przetwarzania żądania AI');
+      }
+    } finally {
       setIsProcessing(false);
-      return;
     }
-
-    // Simulate AI processing delay
-    await new Promise(resolve => setTimeout(resolve, 600));
-
-    const action = parseUserIntent(inputText, fridge, meals, shoppingList);
-
-    if (action.type !== 'unknown') {
-      onAIAction(action);
-      toast.success(action.message);
-      setInputText('');
-    } else {
-      toast.error(action.message);
-    }
-
-    setIsProcessing(false);
-  }, [inputText, onAIAction, fridge, meals, shoppingList, onAddFridgeItems, language]);
+  }, [inputText, language, fridge, meals, shoppingList, onAIAction]);
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -575,19 +114,15 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
 
   return (
     <div className="mb-5">
-      {/* Hint text */}
       <p className="text-xs text-muted-foreground mb-2 text-center">
         {t('chat.hint') || 'Wpisz komendę lub użyj głosu'}
       </p>
-
-      {/* Input container */}
       <div className="relative">
         <div className={`
           glass-card rounded-2xl p-1 flex items-center gap-2
           transition-all duration-300
           ${isListening ? 'ring-2 ring-primary shadow-lg shadow-primary/20' : ''}
         `}>
-          {/* Voice button */}
           {isSupported && (
             <button
               onClick={handleToggleListening}
@@ -595,8 +130,8 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
               className={`
                 shrink-0 w-10 h-10 rounded-xl flex items-center justify-center
                 transition-all duration-300
-                ${isListening 
-                  ? 'bg-destructive text-destructive-foreground animate-pulse' 
+                ${isListening
+                  ? 'bg-destructive text-destructive-foreground animate-pulse'
                   : 'bg-primary/10 text-primary hover:bg-primary/20'
                 }
                 ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}
@@ -607,7 +142,6 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
             </button>
           )}
 
-          {/* Text input */}
           <input
             type="text"
             value={inputText}
@@ -622,7 +156,6 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
             "
           />
 
-          {/* Send button */}
           <button
             onClick={handleSubmit}
             disabled={!inputText.trim() || isProcessing}
@@ -638,7 +171,6 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
           </button>
         </div>
 
-        {/* Listening indicator */}
         {isListening && (
           <div className="absolute -bottom-6 left-0 right-0 flex justify-center">
             <div className="flex items-center gap-1">
@@ -651,7 +183,6 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
         )}
       </div>
 
-      {/* Error message */}
       {error && (
         <p className="text-[10px] text-destructive mt-2 text-center">
           {error === 'not-allowed' ? 'Microphone access denied. Please allow microphone access in your browser settings.' :
@@ -660,7 +191,6 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
         </p>
       )}
 
-      {/* Quick hints */}
       <div className="mt-3 flex flex-wrap gap-1 justify-center">
         <span className="text-[10px] text-muted-foreground bg-muted px-2 py-1 rounded-full">
           &quot;dodaj mleko do lodówki&quot;
