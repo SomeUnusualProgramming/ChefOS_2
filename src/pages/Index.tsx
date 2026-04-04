@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/hooks/useTranslation';
-import { runAllAgents } from '@/agents/runAgents';
+import { runAllAgents, FridgeCleanupSuggestion } from '@/agents/runAgents';
 import BottomNav from '@/components/BottomNav';
 import Dashboard from '@/components/Dashboard';
 import FridgePage from '@/components/FridgePage';
@@ -15,6 +15,7 @@ import { toast } from 'sonner';
 const Index = () => {
   const [page, setPage] = useState('dashboard');
   const [proposedActions, setProposedActions] = useState<ProposedAction[]>([]);
+  const [cleanupItems, setCleanupItems] = useState<FridgeCleanupSuggestion[]>([]);
   const store = useAppStore();
   const { t } = useTranslation(store.language);
 
@@ -36,6 +37,7 @@ const Index = () => {
       result.suggestions.forEach(s => store.addSuggestion(s));
       store.setMeals(result.meals);
       store.setShoppingList(result.shoppingList);
+      setCleanupItems(result.cleanupItems);
       toast.success('Plan updated automatically!');
     }
   }, [store.fridge, store.profile]);
@@ -163,7 +165,10 @@ const Index = () => {
     setProposedActions([]);
   }, [proposedActions, store]);
 
-  // Dismiss all proposed actions
+  // Handle adding multiple fridge items (from review panel)
+  const handleAddFridgeItems = useCallback((items: FridgeItem[]) => {
+    items.forEach(item => store.addFridgeItem(item));
+  }, [store]);
   const handleDismissAllActions = useCallback(() => {
     setProposedActions([]);
     toast.info('Odrzucono wszystkie propozycje');
@@ -194,6 +199,7 @@ const Index = () => {
           onDismissAction={handleDismissAction}
           onApproveAllActions={handleApproveAllActions}
           onDismissAllActions={handleDismissAllActions}
+          onAddFridgeItems={handleAddFridgeItems}
         />
       )}
       {page === 'fridge' && (
@@ -202,6 +208,8 @@ const Index = () => {
           language={store.language}
           onAdd={store.addFridgeItem}
           onRemove={store.removeFridgeItem}
+          onUpdate={store.updateFridgeItem}
+          cleanupItems={cleanupItems}
         />
       )}
       {page === 'meals' && (

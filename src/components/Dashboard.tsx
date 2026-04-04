@@ -20,12 +20,13 @@ interface DashboardProps {
   onDismissAction: (actionId: string) => void;
   onApproveAllActions: () => void;
   onDismissAllActions: () => void;
+  onAddFridgeItems?: (items: FridgeItem[]) => void;
 }
 
 export default function Dashboard({
   language, suggestions, meals, shoppingList, fridge, proposedActions,
   onDismissSuggestion, onAIAction, onNavigate, onApproveAction,
-  onDismissAction, onApproveAllActions, onDismissAllActions,
+  onDismissAction, onApproveAllActions, onDismissAllActions, onAddFridgeItems,
 }: DashboardProps) {
   const { t } = useTranslation(language);
 
@@ -48,7 +49,14 @@ export default function Dashboard({
       </div>
 
       {/* Chat / voice input */}
-      <ChatInput language={language} onAIAction={onAIAction} fridge={fridge} meals={meals} shoppingList={shoppingList} />
+      <ChatInput
+        language={language}
+        onAIAction={onAIAction}
+        fridge={fridge}
+        meals={meals}
+        shoppingList={shoppingList}
+        onAddFridgeItems={onAddFridgeItems}
+      />
 
       {/* Proposed Actions from AI */}
       <ProposedActions
