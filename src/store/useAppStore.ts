@@ -95,6 +95,11 @@ export function useAppStore() {
     setState(s => ({ ...s, shoppingList }));
   }, []);
 
+  const resetData = useCallback(() => {
+    localStorage.removeItem(STORAGE_KEY);
+    setState(defaultState);
+  }, []);
+
   return {
     ...state,
     setLanguage,
@@ -112,5 +117,6 @@ export function useAppStore() {
     clearSuggestions,
     setMeals,
     setShoppingList,
+    resetData,
   };
 }

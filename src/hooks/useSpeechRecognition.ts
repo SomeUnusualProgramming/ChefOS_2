@@ -69,7 +69,12 @@ export function useSpeechRecognition(language: string = 'pl-PL'): UseSpeechRecog
     recognitionRef.current = recognition;
 
     return () => {
-      recognition.stop();
+      try {
+        recognition.stop();
+        recognitionRef.current = null;
+      } catch {
+        // Already stopped or not started
+      }
     };
   }, [language, isSupported]);
 
