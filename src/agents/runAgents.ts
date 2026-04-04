@@ -1,4 +1,6 @@
 import { FridgeItem, Meal, ShoppingItem, AISuggestion, UserProfile } from '@/types/chefos';
+import { isSuspiciousProductName, findBestProductMatch, getCategoryIcon, isKnownProduct, ParsedProduct } from '@/data/productDatabase';
+import { Apple } from 'lucide-react';
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function today() { return new Date().toISOString().split('T')[0]; }
@@ -50,6 +52,117 @@ function runFridgeAgent(fridge: FridgeItem[]): AISuggestion[] {
   }
 
   return suggestions;
+}
+
+// FridgeCleanupAgent: detect and suggest fixes for problematic fridge items
+export interface FridgeCleanupSuggestion {
+  item: FridgeItem;
+  issues: ('unknown_product' | 'suspicious_name' | 'no_category' | 'typo')[ ];
+  suggestedName?: string;
+  suggestedCategory?: string;
+  confidence: number;
+  action: 'review' | 'delete' | 'ignore';
+}
+
+function runFridgeCleanupAgent(fridge: FridgeItem[]): { suggestions: AISuggestion[]; cleanupItems: FridgeCleanupSuggestion[] } {
+  const suggestions: AISuggestion[] = [];
+  const cleanupItems: FridgeCleanupSuggestion[] = [];
+  const now = new Date().toISOString();
+
+  for (const item of fridge) {
+    const issues: ('unknown_product' | 'suspicious_name' | 'no_category' | 'typo')[] = [];
+    let suggestedName: string | undefined;
+    let suggestedCategory: string | undefined;
+    let confidence = 1;
+    let action: 'review' | 'delete' | 'ignore' = 'ignore';
+
+    // Check 1: Suspicious name patterns (commands, gibberish)
+    const suspicious = isSuspiciousProductName(item.product_name);
+    if (!suspicious.isValid) {
+      issues.push('suspicious_name');
+      action = 'delete';
+      confidence = 0;
+    }
+
+    // Check 2: Unknown product (not in database)
+    if (!isKnownProduct(item.product_name)) {
+      issues.push('unknown_product');
+      action = action === 'delete' ? 'delete' : 'review';
+      confidence = 0;
+
+      // Try to find best match for suggestion
+      const match = findBestProductMatch(item.product_name, 0.6);
+      if (match) {
+        suggestedName = match.product.pl;
+        suggestedCategory = match.product.category;
+        confidence = match.confidence;
+        if (match.isTypo) {
+          issues.push('typo');
+        }
+      }
+    }
+
+    // Check 3: No category or "other" category
+    if (!item.category || item.category === 'other') {
+      issues.push('no_category');
+      if (action === 'ignore') action = 'review';
+
+      // Suggest category if we have a match
+      if (!suggestedCategory) {
+        const match = findBestProductMatch(item.product_name, 0.5);
+        if (match) {
+          suggestedCategory = match.product.category;
+          suggestedName = suggestedName || match.product.pl;
+        }
+      }
+    }
+
+    // Only add to cleanup if there are issues
+    if (issues.length > 0) {
+      cleanupItems.push({
+        item,
+        issues,
+        suggestedName,
+        suggestedCategory,
+        confidence,
+        action
+      });
+    }
+  }
+
+  // Create AI suggestions for cleanup
+  if (cleanupItems.length > 0) {
+    const criticalCount = cleanupItems.filter(c => c.action === 'delete').length;
+    const reviewCount = cleanupItems.filter(c => c.action === 'review').length;
+
+    if (criticalCount > 0) {
+      suggestions.push({
+        id: uid(),
+        agent: 'fridge_cleanup',
+        type: 'warning',
+        message: `🧹 Znaleziono ${criticalCount} produktów wymagających usunięcia (podejrzane nazwy/komendy). Kliknij aby posprzątać lodówkę.`,
+        dismissed: false,
+        timestamp: now,
+        action: 'cleanup',
+        data: { cleanupItems: cleanupItems.filter(c => c.action === 'delete') }
+      });
+    }
+
+    if (reviewCount > 0) {
+      suggestions.push({
+        id: uid(),
+        agent: 'fridge_cleanup',
+        type: 'action',
+        message: `📝 ${reviewCount} produktów w lodówce wymaga uwagi (brak kategorii/nieznane produkty). Kliknij aby przejrzeć.`,
+        dismissed: false,
+        timestamp: now,
+        action: 'review',
+        data: { cleanupItems: cleanupItems.filter(c => c.action === 'review') }
+      });
+    }
+  }
+
+  return { suggestions, cleanupItems };
 }
 
 // ChefAgent: generate meal suggestions
@@ -222,15 +335,18 @@ export function runAllAgents(
   suggestions: AISuggestion[];
   meals: Meal[];
   shoppingList: ShoppingItem[];
+  cleanupItems: FridgeCleanupSuggestion[];
 } {
   const fridgeSuggestions = runFridgeAgent(fridge);
+  const { suggestions: cleanupSuggestions, cleanupItems } = runFridgeCleanupAgent(fridge);
   const { meals, suggestions: chefSuggestions } = runChefAgent(fridge, profile);
   const { items: shoppingList, suggestions: shoppingSuggestions } = runShoppingAgent(meals, fridge);
   const coachSuggestions = runCoachAgent(profile);
 
   return {
-    suggestions: [...fridgeSuggestions, ...chefSuggestions, ...shoppingSuggestions, ...coachSuggestions],
+    suggestions: [...fridgeSuggestions, ...cleanupSuggestions, ...chefSuggestions, ...shoppingSuggestions, ...coachSuggestions],
     meals,
     shoppingList,
+    cleanupItems,
   };
 }

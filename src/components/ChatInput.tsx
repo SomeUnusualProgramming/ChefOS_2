@@ -4,6 +4,7 @@ import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { Language, FridgeItem, Meal, ShoppingItem } from '@/types/chefos';
 import { Mic, MicOff, Send, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { parseAndValidateProduct, isSuspiciousProductName } from '@/data/productDatabase';
 
 export interface ProposedAction {
   id: string;
@@ -25,6 +26,7 @@ interface ChatInputProps {
   fridge: FridgeItem[];
   meals: Meal[];
   shoppingList: ShoppingItem[];
+  onAddFridgeItems?: (items: FridgeItem[]) => void;
 }
 
 // Check if text looks like a valid product name (has vowels, reasonable length)
@@ -35,6 +37,45 @@ function looksLikeValidProduct(text: string): boolean {
   // Should not be just consonants or random letters
   const consonantRatio = (text.match(/[bcdfghjklmnpqrstvwxz]/gi) || []).length / text.length;
   return hasVowel && consonantRatio < 0.8;
+}
+
+// New validation-based parser for extracting fridge items from natural language
+function parseFridgeItemsFromTextWithValidation(
+  text: string,
+  language: 'en' | 'pl' | 'es' | 'de' = 'pl'
+): ParsedProduct[] {
+  const products: ParsedProduct[] = [];
+
+  // Split by common separators
+  const lines = text.split(/[,\.\n;]+/).map(s => s.trim()).filter(s => s.length > 0);
+
+  for (const line of lines) {
+    if (line.length < 2) continue;
+
+    // Skip lines that are clearly commands or don't look like products
+    const suspiciousCheck = isSuspiciousProductName(line);
+    if (!suspiciousCheck.isValid) {
+      // Try to extract product name from command-like text
+      const cleaned = line
+        .replace(/\b(dodaj|do|lodówki|lodowki|fridge|add|to)\b/gi, '')
+        .replace(/\b(usuń|usun|z|listy|remove|from|list)\b/gi, '')
+        .trim();
+
+      if (cleaned.length >= 2) {
+        const validated = parseAndValidateProduct(cleaned, language);
+        if (!validated.needsReview || validated.confidence > 0.5) {
+          products.push(validated);
+        }
+      }
+      continue;
+    }
+
+    // Validate and get product info
+    const validated = parseAndValidateProduct(line, language);
+    products.push(validated);
+  }
+
+  return products;
 }
 
 // AI parser for extracting fridge items from natural language
@@ -432,7 +473,7 @@ function parseUserIntent(text: string, fridge: FridgeItem[], meals: Meal[], shop
   return { type: 'unknown', message: 'Nie rozumiem. Spróbuj: "Idę do sklepu, chcę kupić wołowinę na obiad" lub "Zaplanuj obiad z kurczakiem"' };
 }
 
-export default function ChatInput({ language, onAIAction, fridge, meals, shoppingList }: ChatInputProps) {
+export default function ChatInput({ language, onAIAction, fridge, meals, shoppingList, onAddFridgeItems }: ChatInputProps) {
   const { t } = useTranslation(language);
   const [inputText, setInputText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -468,6 +509,47 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
 
     setIsProcessing(true);
 
+    // Check if this is a fridge add command
+    const lowerText = inputText.toLowerCase();
+    const isFridgeAdd = /\b(dodaj|dodajcie|mam|kupiłem|kupiłam|wpisz|wloz|włóż|wlozylam|wlozylem|dodac|dodać|add|bought|got|purchased|have|włożyłem|włożyłam)\b.*\b(do lodówki|do lodowki|lodówkę|lodowke|lodówki|lodowki|fridge|refrigerator)\b/.test(lowerText);
+
+    if (isFridgeAdd && onAddFridgeItems) {
+      // Parse and add products directly without review
+      const validatedProducts = parseFridgeItemsFromTextWithValidation(inputText, language as 'en' | 'pl' | 'es' | 'de');
+
+      // Filter out products that failed validation completely
+      const validProducts = validatedProducts.filter(p => p.confidence > 0.3);
+
+      if (validProducts.length === 0) {
+        toast.error('Nie rozpoznano żadnych produktów. Spróbuj użyć wyraźniejszych nazw.');
+        setIsProcessing(false);
+        return;
+      }
+
+      // Add all products directly without review panel
+      const now = new Date();
+      const items: FridgeItem[] = validProducts.map((product, index) => {
+        const expiryDate = new Date(now);
+        expiryDate.setDate(expiryDate.getDate() + product.shelfLifeDays);
+
+        return {
+          id: `fridge-${Date.now()}-${index}`,
+          product_name: product.suggestedNamePl.charAt(0).toUpperCase() + product.suggestedNamePl.slice(1),
+          quantity: 1,
+          unit: 'pcs',
+          expiration_date: expiryDate.toISOString().split('T')[0],
+          added_date: now.toISOString().split('T')[0],
+          category: product.category,
+        };
+      });
+
+      onAddFridgeItems(items);
+      toast.success(`Dodano ${items.length} produktów do lodówki`);
+      setInputText('');
+      setIsProcessing(false);
+      return;
+    }
+
     // Simulate AI processing delay
     await new Promise(resolve => setTimeout(resolve, 600));
 
@@ -482,7 +564,7 @@ export default function ChatInput({ language, onAIAction, fridge, meals, shoppin
     }
 
     setIsProcessing(false);
-  }, [inputText, onAIAction, fridge, meals, shoppingList]);
+  }, [inputText, onAIAction, fridge, meals, shoppingList, onAddFridgeItems, language]);
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {

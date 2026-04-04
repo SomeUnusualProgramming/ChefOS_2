@@ -84,6 +84,7 @@ export function useAppStore() {
         unit: item.unit,
         expiration_date: expirationDate.toISOString().split('T')[0],
         added_date: new Date().toISOString().split('T')[0],
+        category: item.category,
       };
 
       return {

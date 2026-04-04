@@ -1,7 +1,12 @@
-import { ShoppingItem, Language } from '@/types/chefos';
+import { ShoppingItem, Language, ProductCategory } from '@/types/chefos';
 import { useTranslation } from '@/hooks/useTranslation';
 import { ShoppingCart, Check, Plus, Minus, X, ArrowRight } from 'lucide-react';
 import { useState } from 'react';
+
+const CATEGORIES: ProductCategory[] = [
+  'dairy', 'meat', 'fish', 'vegetables', 'fruits', 'grains',
+  'beverages', 'condiments', 'snacks', 'frozen', 'other'
+];
 
 interface ShoppingPageProps {
   items: ShoppingItem[];
@@ -15,11 +20,21 @@ interface ShoppingPageProps {
 export default function ShoppingPage({ items, language, onPurchase, onToggle, onAdd, onRemove }: ShoppingPageProps) {
   const { t } = useTranslation(language);
   const [name, setName] = useState('');
+  const [category, setCategory] = useState<ProductCategory>('other');
   const [editingItem, setEditingItem] = useState<ShoppingItem | null>(null);
   const [editQuantity, setEditQuantity] = useState(1);
+  const [showCategorySelect, setShowCategorySelect] = useState(false);
 
   const pending = items.filter(i => !i.purchased);
   const done = items.filter(i => i.purchased);
+
+  // Group pending items by category
+  const groupedPending = pending.reduce((acc, item) => {
+    const cat = item.category || 'other';
+    if (!acc[cat]) acc[cat] = [];
+    acc[cat].push(item);
+    return acc;
+  }, {} as Record<ProductCategory, ShoppingItem[]>);
 
   const handleQuickAdd = () => {
     if (!name.trim()) return;
@@ -29,8 +44,11 @@ export default function ShoppingPage({ items, language, onPurchase, onToggle, on
       quantity: 1,
       unit: 'pcs',
       purchased: false,
+      category,
     });
     setName('');
+    setCategory('other');
+    setShowCategorySelect(false);
   };
 
   const openPurchaseModal = (item: ShoppingItem) => {
@@ -55,7 +73,7 @@ export default function ShoppingPage({ items, language, onPurchase, onToggle, on
         <ShoppingCart size={20} /> {t('shopping.title')}
       </h1>
 
-      <div className="flex gap-2 mb-4">
+      <div className="flex gap-2 mb-2">
         <input
           className="flex-1 bg-muted rounded-xl px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
           placeholder={t('shopping.addItem')}
@@ -68,30 +86,65 @@ export default function ShoppingPage({ items, language, onPurchase, onToggle, on
         </button>
       </div>
 
+      {showCategorySelect && (
+        <div className="mb-4">
+          <select
+            className="w-full bg-muted rounded-xl px-3 py-2 text-sm text-foreground"
+            value={category}
+            onChange={e => setCategory(e.target.value as ProductCategory)}
+          >
+            {CATEGORIES.map(cat => (
+              <option key={cat} value={cat}>{t(`category.${cat}`)}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="mb-4">
+        <button
+          onClick={() => setShowCategorySelect(!showCategorySelect)}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
+        >
+          {showCategorySelect ? '− ' : '+ '}
+          {t('shopping.category') || 'Kategoria'}: {t(`category.${category}`)}
+        </button>
+      </div>
+
       {items.length === 0 ? (
         <div className="text-center py-16 text-muted-foreground"><p>{t('shopping.empty')}</p></div>
       ) : (
         <>
           {pending.length > 0 && (
-            <div className="space-y-2 mb-4">
-              {pending.map(item => (
-                <div key={item.id} className="glass-card rounded-xl p-3 flex items-center gap-3">
-                  <button
-                    onClick={() => openPurchaseModal(item)}
-                    className="w-5 h-5 rounded-full border-2 border-primary flex items-center justify-center shrink-0 hover:bg-primary/10 transition-colors"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground">{item.product_name}</p>
-                    <p className="text-xs text-muted-foreground">{item.quantity} {item.unit}{item.meal_association ? ` · ${item.meal_association}` : ''}</p>
+            <div className="space-y-4 mb-4">
+              {CATEGORIES.map(cat => {
+                const catItems = groupedPending[cat] || [];
+                if (catItems.length === 0) return null;
+                return (
+                  <div key={cat}>
+                    <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase">{t(`category.${cat}`)}</p>
+                    <div className="space-y-2">
+                      {catItems.map(item => (
+                        <div key={item.id} className="glass-card rounded-xl p-3 flex items-center gap-3">
+                          <button
+                            onClick={() => openPurchaseModal(item)}
+                            className="w-5 h-5 rounded-full border-2 border-primary flex items-center justify-center shrink-0 hover:bg-primary/10 transition-colors"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-foreground">{item.product_name}</p>
+                            <p className="text-xs text-muted-foreground">{item.quantity} {item.unit}{item.meal_association ? ` · ${item.meal_association}` : ''}</p>
+                          </div>
+                          <button
+                            onClick={() => onRemove(item.id)}
+                            className="text-muted-foreground hover:text-destructive transition-colors"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <button
-                    onClick={() => onRemove(item.id)}
-                    className="text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 

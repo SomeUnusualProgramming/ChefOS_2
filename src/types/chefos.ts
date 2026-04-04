@@ -6,6 +6,7 @@ export interface FridgeItem {
   expiration_date: string;
   nutrients?: { calories?: number; protein?: number; carbs?: number; fat?: number };
   added_date: string;
+  category?: ProductCategory;
 }
 
 export interface Meal {
@@ -25,7 +26,21 @@ export interface ShoppingItem {
   unit: string;
   meal_association?: string;
   purchased: boolean;
+  category?: ProductCategory;
 }
+
+export type ProductCategory =
+  | 'dairy'
+  | 'meat'
+  | 'fish'
+  | 'vegetables'
+  | 'fruits'
+  | 'grains'
+  | 'beverages'
+  | 'condiments'
+  | 'snacks'
+  | 'frozen'
+  | 'other';
 
 export interface UserProfile {
   weight?: number;
@@ -39,10 +54,11 @@ export interface UserProfile {
 
 export interface AISuggestion {
   id: string;
-  agent: 'fridge' | 'chef' | 'shopping' | 'coach';
+  agent: 'fridge' | 'chef' | 'shopping' | 'coach' | 'fridge_cleanup';
   type: 'info' | 'warning' | 'action' | 'tip';
   message: string;
   action?: string;
+  data?: unknown;
   dismissed: boolean;
   timestamp: string;
 }
