@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '@/store/useAppStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { runAllAgents, FridgeCleanupSuggestion } from '@/agents/runAgents';
+import { API_BASE_URL } from '@/config/api';
 import BottomNav from '@/components/BottomNav';
 import Dashboard from '@/components/Dashboard';
 import FridgePage from '@/components/FridgePage';
@@ -12,35 +13,101 @@ import type { AIAction, ProposedAction } from '@/components/ChatInput';
 import type { Meal, ShoppingItem, FridgeItem } from '@/types/chefos';
 import { toast } from 'sonner';
 
+// Health check and background monitoring intervals (ms)
+const HEALTH_CHECK_INTERVAL = 30000; // 30s
+const ACTIVE_MONITORING_INTERVAL = 120000; // 2min - active AI monitoring
+
 const Index = () => {
   const [page, setPage] = useState('dashboard');
   const [proposedActions, setProposedActions] = useState<ProposedAction[]>([]);
   const [cleanupItems, setCleanupItems] = useState<FridgeCleanupSuggestion[]>([]);
+  const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
   const store = useAppStore();
   const { t } = useTranslation(store.language);
+
+  // Health check for backend connection
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/health`, {
+          method: 'GET',
+        }).catch(() => null);
+        const isConnected = response !== null && response.ok;
+        if (backendConnected === false && isConnected) {
+          toast.success('Połączono z backendem AI');
+        }
+        setBackendConnected(isConnected);
+      } catch {
+        setBackendConnected(false);
+      }
+    };
+
+    checkHealth();
+    const interval = setInterval(checkHealth, HEALTH_CHECK_INTERVAL);
+    return () => clearInterval(interval);
+  }, [backendConnected]);
 
   // Auto-run agents when fridge or profile changes
   const prevFridgeLen = useRef(store.fridge.length);
   const prevProfileStr = useRef(JSON.stringify(store.profile));
+  const lastRunTime = useRef<number>(0);
+
+  const runAgentsWithFallback = useCallback(async (isBackground = false) => {
+    // Skip if backend not connected and not first run
+    if (backendConnected === false && isBackground) {
+      return;
+    }
+
+    try {
+      const result = await runAllAgents(store.fridge, store.profile, store.language);
+      store.clearSuggestions();
+      result.suggestions.forEach(s => store.addSuggestion(s));
+      store.setMeals(result.meals);
+      store.setShoppingList(result.shoppingList);
+      setCleanupItems(result.cleanupItems);
+      if (!isBackground) {
+        toast.success('Plan updated automatically!');
+      }
+      setBackendConnected(true);
+      lastRunTime.current = Date.now();
+    } catch (error) {
+      console.error(error);
+      setBackendConnected(false);
+      if (!isBackground) {
+        toast.error('Nie udało się uruchomić agentów backendowych - upewnij się że backend działa (docker-compose up -d)');
+      }
+    }
+  }, [store, backendConnected]);
 
   useEffect(() => {
     const profileStr = JSON.stringify(store.profile);
     const fridgeChanged = store.fridge.length !== prevFridgeLen.current;
     const profileChanged = profileStr !== prevProfileStr.current;
 
-    if (fridgeChanged || profileChanged) {
-      prevFridgeLen.current = store.fridge.length;
-      prevProfileStr.current = profileStr;
+    if (!(fridgeChanged || profileChanged)) return;
 
-      const result = runAllAgents(store.fridge, store.profile);
-      store.clearSuggestions();
-      result.suggestions.forEach(s => store.addSuggestion(s));
-      store.setMeals(result.meals);
-      store.setShoppingList(result.shoppingList);
-      setCleanupItems(result.cleanupItems);
-      toast.success('Plan updated automatically!');
-    }
-  }, [store.fridge, store.profile]);
+    prevFridgeLen.current = store.fridge.length;
+    prevProfileStr.current = profileStr;
+
+    const run = async () => {
+      await runAgentsWithFallback(false);
+    };
+
+    run();
+  }, [store.fridge, store.profile, store.language, runAgentsWithFallback]);
+
+  // Active AI monitoring - runs periodically to catch issues
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Only run if enough time passed and user has data
+      const timeSinceLastRun = Date.now() - lastRunTime.current;
+      if (timeSinceLastRun > ACTIVE_MONITORING_INTERVAL && (store.fridge.length > 0 || store.meals.length > 0)) {
+        runAgentsWithFallback(true);
+      }
+    }, ACTIVE_MONITORING_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [runAgentsWithFallback, store.fridge.length, store.meals.length]);
 
   const handleAIAction = useCallback((action: AIAction) => {
     switch (action.type) {
