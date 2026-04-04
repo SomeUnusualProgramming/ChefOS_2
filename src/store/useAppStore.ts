@@ -68,6 +68,34 @@ export function useAppStore() {
     }));
   }, []);
 
+  const purchaseShoppingItem = useCallback((id: string, quantity?: number) => {
+    setState(s => {
+      const item = s.shoppingList.find(i => i.id === id);
+      if (!item) return s;
+
+      const finalQuantity = quantity ?? item.quantity;
+      const expirationDate = new Date();
+      expirationDate.setDate(expirationDate.getDate() + 7);
+
+      const fridgeItem: FridgeItem = {
+        id: Math.random().toString(36).slice(2, 10),
+        product_name: item.product_name,
+        quantity: finalQuantity,
+        unit: item.unit,
+        expiration_date: expirationDate.toISOString().split('T')[0],
+        added_date: new Date().toISOString().split('T')[0],
+      };
+
+      return {
+        ...s,
+        fridge: [...s.fridge, fridgeItem],
+        shoppingList: s.shoppingList.map(i =>
+          i.id === id ? { ...i, purchased: true, quantity: finalQuantity } : i
+        ),
+      };
+    });
+  }, []);
+
   const updateProfile = useCallback((updates: Partial<UserProfile>) => {
     setState(s => ({ ...s, profile: { ...s.profile, ...updates } }));
   }, []);
@@ -111,6 +139,7 @@ export function useAppStore() {
     addShoppingItem,
     removeShoppingItem,
     toggleShoppingItem,
+    purchaseShoppingItem,
     updateProfile,
     addSuggestion,
     dismissSuggestion,
