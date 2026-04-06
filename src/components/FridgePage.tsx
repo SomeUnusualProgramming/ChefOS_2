@@ -8,6 +8,7 @@ import { getProductByName, getCategoryIcon, validateReceiptProducts, ValidatedRe
 import { toast } from 'sonner';
 import ReceiptScanner, { DetectedProduct } from './ReceiptScanner';
 import ProductReviewPanel, { ParsedProduct } from './ProductReviewPanel';
+import FridgeAIChat from './FridgeAIChat';
 
 interface FridgePageProps {
   fridge: FridgeItem[];
@@ -232,6 +233,34 @@ export default function FridgePage({ fridge, language, onAdd, onRemove, onUpdate
           </button>
         </div>
       </div>
+
+      {/* AI Chat Assistant - at top */}
+      <FridgeAIChat
+        fridge={fridge}
+        language={language}
+        onAction={(action) => {
+          // Handle actions from AI chat
+          if (action.type === 'fridge_remove' && action.data?.itemId) {
+            onRemove(action.data.itemId as string);
+          } else if (action.type === 'fridge_add' && action.data) {
+            const data = action.data as Record<string, unknown>;
+            onAdd({
+              id: `ai-${Date.now()}`,
+              product_name: (data.product_name as string) || 'Produkt',
+              quantity: (data.quantity as number) || 1,
+              unit: (data.unit as string) || 'szt',
+              expiration_date: (data.expiration_date as string) || new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+              added_date: new Date().toISOString(),
+              category: (data.category as ProductCategory) || 'other',
+            });
+          } else if (action.type === 'fridge_update' && action.data && onUpdate) {
+            const data = action.data as Record<string, unknown>;
+            onUpdate(data.itemId as string, {
+              quantity: data.new_quantity as number,
+            });
+          }
+        }}
+      />
 
       {/* Cleanup Alert Banner */}
       {hasCleanupItems && !showCleanupPanel && (

@@ -12,6 +12,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# Import intelligent agent system
+from ai_agents import AgentSystem, ContextBuilder, AIResponse, AIAction, find_matching_fridge_item, extract_quantity
+
+# Initialize AI agent system
+agent_system = AgentSystem()
+
 
 class FridgeItem(BaseModel):
     id: str
@@ -462,8 +468,14 @@ async def llm_chat(system_prompt: str, user_prompt: str, json_mode: bool = False
             response = await client.post(
                 f"{GROQ_BASE_URL}/chat/completions",
                 json=payload,
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {GROQ_API_KEY.strip()}", "Content-Type": "application/json"},
             )
+            
+            # Check for auth errors
+            if response.status_code == 401:
+                print(f"Groq API key invalid (401). Key: {GROQ_API_KEY[:20]}...")
+                return None
+                
             response.raise_for_status()
             body = response.json()
             return body.get("choices", [{}])[0].get("message", {}).get("content")
@@ -532,150 +544,346 @@ async def ai_enhance_suggestions(
         return []
 
 
+def _extract_product_and_quantity(text: str, fridge: list[FridgeItem]) -> tuple[str, float, FridgeItem | None] | None:
+    """Extract product name and quantity from text. Returns (product_name, quantity, existing_item_or_none)"""
+    text_lower = text.lower()
+
+    # Extract number from text (Polish and English patterns)
+    # Patterns: "mam 2 mleka", "2 mleka", "mam dwa mleka", "mleko - 2 szt", "mleko x2"
+    quantity = 1.0
+    quantity_match = re.search(r'(?:mam\s+|kupi[łl][ea]?m?\s+|dodaj\s+|^)\s*(\d+)\s+', text_lower)
+    if quantity_match:
+        quantity = float(quantity_match.group(1))
+
+    # Also check for "x2" or "x 2" pattern at end
+    x_match = re.search(r'[x×]\s*(\d+)$', text_lower)
+    if x_match:
+        quantity = float(x_match.group(1))
+
+    # Remove common filler words to get product name
+    # Polish verb forms: mam, mamy, masz, mają + English have/has
+    filler_words = [
+        # Polish verb variations (mam = I have, mamy = we have, etc.)
+        r'mam[ayą]?', r'ma[sś]z', r'maj[ąa]',
+        # English have/has
+        r'have\b', r'has\b', r'got\b',
+        # Action words
+        r'dodaj\b', r'kupi[lł][ea]?m?', r'jest\b',
+        # Location phrases
+        r'w\s+lod[oó]wce\b', r'do\s+lod[oó]wki\b',
+        r'w\s+fridge\b', r'in\s+fridge\b',
+        # Units
+        r'szt\.?\b', r'sztuk[ia]?\b', r'litr[óoy]?\b', r'kg\b', r'gram[óoy]?\b',
+        r'butelk[ai]\b', r'opakow[ae]ni[ae]\b', r'pude[lł]k[oa]\b',
+        r'pcs\b', r'bottle\b', r'pack\b',
+        # Numbers at end or xN pattern
+        r'\d+\s*$', r'[x×]\s*\d+\s*$',
+    ]
+
+    # Clean step by step
+    product_text = text_lower
+    for pattern in filler_words:
+        product_text = re.sub(pattern, '', product_text, flags=re.IGNORECASE)
+    
+    # Remove leftover artifacts
+    product_text = re.sub(r'\s+', ' ', product_text)  # multiple spaces -> single
+    product_text = re.sub(r'^\s*[–-]\s*', '', product_text)  # leading dash
+    product_text = re.sub(r'\s*[–-]\s*$', '', product_text)  # trailing dash
+
+    # Clean up and title case
+    product_name = product_text.strip().rstrip('.,;:!?').strip()
+    if not product_name or len(product_name) < 2:
+        return None
+
+    product_name = product_name.title()
+
+    # Check if similar product exists in fridge
+    existing_item = None
+    normalized_input = normalize_product_name(product_name)
+
+    for item in fridge:
+        normalized_item = normalize_product_name(item.product_name)
+        # Check for exact match or contained match
+        if normalized_input == normalized_item:
+            existing_item = item
+            break
+        if normalized_input in normalized_item or normalized_item in normalized_input:
+            existing_item = item
+            break
+
+    return (product_name, quantity, existing_item)
+
+
 def fallback_chat_action(payload: ChatActionRequest) -> AIActionResponse:
     text = payload.text.lower()
-    if "lod" in text and any(k in text for k in ["dodaj", "add", "mam", "kupi"]):
-        item_name = re.sub(r"[^a-zA-Ząćęłńóśźż\s]", "", payload.text).strip() or "Produkt"
-        item = {
-            "id": f"fridge-{uid()}",
-            "product_name": item_name.title(),
-            "quantity": 1,
-            "unit": "pcs",
-            "expiration_date": (date.today() + timedelta(days=7)).isoformat(),
-            "added_date": date.today().isoformat(),
-        }
-        return AIActionResponse(type="propose", data=[{"id": f"propose-{uid()}", "type": "fridge_add", "data": item, "description": f"Dodać {item['product_name']} do lodówki", "icon": "fridge"}], message="Przygotowałem propozycję dodania produktu do lodówki.")
-    return AIActionResponse(type="unknown", message="Nie rozumiem polecenia. Spróbuj podać konkretną akcję.")
+
+    # Check if this is about fridge and contains a product mention
+    fridge_keywords = ["lodówka", "lodówce", "lodowka", "lodowce", "lodówki", "fridge", "mam", "dodaj"]
+    if any(k in text for k in fridge_keywords):
+        extracted = _extract_product_and_quantity(payload.text, payload.fridge)
+
+        if extracted:
+            product_name, quantity, existing_item = extracted
+
+            if existing_item:
+                # Product exists - propose quantity update
+                new_quantity = quantity if quantity != 1 else existing_item.quantity + 1
+
+                return AIActionResponse(
+                    type="fridge_update",
+                    data={
+                        "itemId": existing_item.id,
+                        "product_name": existing_item.product_name,
+                        "old_quantity": existing_item.quantity,
+                        "new_quantity": new_quantity,
+                    },
+                    message=f"Zaktualizować ilość '{existing_item.product_name}' z {existing_item.quantity} do {new_quantity}?"
+                )
+            else:
+                # New product - propose add
+                item = {
+                    "id": f"fridge-{uid()}",
+                    "product_name": product_name,
+                    "quantity": quantity,
+                    "unit": "szt",
+                    "expiration_date": (date.today() + timedelta(days=7)).isoformat(),
+                    "added_date": date.today().isoformat(),
+                }
+                return AIActionResponse(
+                    type="propose",
+                    data=[{
+                        "id": f"propose-{uid()}",
+                        "type": "fridge_add",
+                        "data": item,
+                        "description": f"Dodać {item['product_name']} ({quantity} szt) do lodówki",
+                        "icon": "fridge"
+                    }],
+                    message=f"Przygotowałem propozycję dodania {product_name} do lodówki."
+                )
+
+    # Default: unknown
+    return AIActionResponse(
+        type="unknown",
+        message="Nie rozumiem polecenia. Spróbuj podać konkretną akcję, np. 'mam 2 mleka w lodówce'."
+    )
 
 
 async def llm_chat_action(payload: ChatActionRequest) -> AIActionResponse | None:
-    system_prompt = (
-        "Zwróć WYŁĄCZNIE JSON: "
-        "{\"intent\":\"fridge_add|shopping_add|meal_add|meal_remove|shopping_remove|unknown\","
-        "\"items\":[{\"product_name\":\"string\",\"quantity\":number,\"unit\":\"string\"}],"
-        "\"meal_name\":\"string|null\","
-        "\"message\":\"string\"}."
+    """
+    New intelligent chat action using chain-of-thought reasoning.
+    AI understands context, reasons about user intent, and proposes smart actions.
+    """
+    
+    # Build rich context for AI
+    system_prompt = agent_system.get_system_prompt(payload.language)
+    user_prompt = agent_system.build_user_prompt(
+        user_message=payload.text,
+        fridge=payload.fridge,
+        meals=payload.meals,
+        shopping=payload.shoppingList,
+        profile=UserProfile(),  # Empty profile for now, can be extended
+        language=payload.language
     )
-    state = {
-        "text": payload.text,
-        "language": payload.language,
-        "fridge": [f.model_dump() for f in payload.fridge[:20]],
-        "meals": [m.model_dump() for m in payload.meals[:20]],
-        "shopping": [s.model_dump() for s in payload.shoppingList[:20]],
-    }
-    raw = await ollama_chat(system_prompt, json.dumps(state, ensure_ascii=False), json_mode=True)
+    
+    # DEBUG: Log what we're sending to AI
+    print(f"\n=== AI CHAT ACTION ===")
+    print(f"User message: {payload.text}")
+    print(f"Fridge items count: {len(payload.fridge)}")
+    if payload.fridge:
+        print(f"Fridge items: {[f'{item.product_name} ({item.quantity} {item.unit})' for item in payload.fridge[:5]]}")
+    
+    # Call LLM with rich context
+    raw = await llm_chat(system_prompt, user_prompt, json_mode=True)
+    
+    # DEBUG: Log AI response
+    print(f"AI raw response: {raw[:500] if raw else 'None'}...")
+    
     if not raw:
         return None
-
+    
     try:
         parsed = json.loads(raw)
-    except Exception:
-        return None
-
-    intent = parsed.get("intent", "unknown")
-    message = parsed.get("message") or "Przetworzyłem polecenie."
-    items = parsed.get("items") or []
-
-    if intent not in {"fridge_add", "shopping_add", "meal_add", "meal_remove", "shopping_remove", "unknown"}:
-        intent = "unknown"
-
-    if intent == "unknown":
-        return AIActionResponse(type="unknown", message=message)
-
-    if intent == "meal_remove":
-        target = payload.meals[0].id if payload.meals else ""
-        if not target:
-            return AIActionResponse(type="unknown", message="Nie znaleziono posiłku do usunięcia.")
-        action = ProposedAction(
-            id=f"propose-{uid()}",
-            type="meal_remove",
-            data={"mealId": target},
-            description="Usunąć wskazany posiłek z planu",
-            icon="meal",
-        )
-        return AIActionResponse(type="propose", data=[action.model_dump()], message=message)
-
-    if intent == "shopping_remove":
-        target = payload.shoppingList[0].id if payload.shoppingList else ""
-        if not target:
-            return AIActionResponse(type="unknown", message="Nie znaleziono pozycji zakupowej do usunięcia.")
-        action = ProposedAction(
-            id=f"propose-{uid()}",
-            type="shopping_remove",
-            data={"itemId": target},
-            description="Usunąć wskazaną pozycję z listy zakupów",
-            icon="shopping",
-        )
-        return AIActionResponse(type="propose", data=[action.model_dump()], message=message)
-
-    proposals: list[ProposedAction] = []
-
-    for item in items[:5]:
-        product_name = str(item.get("product_name") or "Produkt").strip().title()
-        quantity = float(item.get("quantity") or 1)
-        unit = str(item.get("unit") or "pcs")
-
-        if intent == "fridge_add":
-            fridge_item = {
+        
+        # Validate response structure
+        if "actions" not in parsed or "thinking" not in parsed:
+            print(f"Invalid AI response structure: {parsed}")
+            return None
+        
+        # Convert AI actions to frontend-compatible format
+        actions = parsed.get("actions", [])
+        if not actions:
+            return AIActionResponse(
+                type="unknown",
+                message=parsed.get("message", "Nie zidentyfikowałem konkretnej akcji do wykonania.")
+            )
+        
+        # Take the first high-confidence action
+        best_action = None
+        for action in actions:
+            if action.get("confidence", 0) > 0.6:
+                best_action = action
+                break
+        
+        if not best_action:
+            return AIActionResponse(
+                type="unknown",
+                message=parsed.get("message", "Nie jestem pewien co zrobić. Czy możesz doprecyzować?")
+            )
+        
+        action_type = best_action.get("action_type", "unknown")
+        
+        # Handle different action types
+        if action_type == "fridge_add":
+            data = best_action.get("data", {})
+            product_name = data.get("product_name", "Produkt")
+            quantity = data.get("quantity", 1)
+            
+            # Check if product already exists (AI might have missed this)
+            existing = find_matching_fridge_item(product_name, payload.fridge)
+            if existing:
+                # Convert to update instead
+                return AIActionResponse(
+                    type="fridge_update",
+                    data={
+                        "itemId": existing.id,
+                        "new_quantity": quantity,
+                        "product_name": existing.product_name,
+                    },
+                    message=f"Zaktualizować ilość '{existing.product_name}' do {quantity}?"
+                )
+            
+            # Create new fridge item
+            item = {
                 "id": f"fridge-{uid()}",
                 "product_name": product_name,
                 "quantity": quantity,
-                "unit": unit,
+                "unit": data.get("unit", "szt"),
                 "expiration_date": (date.today() + timedelta(days=7)).isoformat(),
                 "added_date": date.today().isoformat(),
+                "category": data.get("category"),
             }
-            proposals.append(
-                ProposedAction(
-                    id=f"propose-{uid()}",
-                    type="fridge_add",
-                    data=fridge_item,
-                    description=f"Dodać {product_name} do lodówki",
-                    icon="fridge",
-                )
+            
+            return AIActionResponse(
+                type="propose",
+                data=[{
+                    "id": f"propose-{uid()}",
+                    "type": "fridge_add",
+                    "data": item,
+                    "description": f"Dodać {product_name} ({quantity} szt) do lodówki",
+                    "icon": "fridge"
+                }],
+                message=parsed.get("message", f"Chcę dodać {product_name} do lodówki.")
             )
-        elif intent == "shopping_add":
-            shopping_item = {
+        
+        elif action_type == "fridge_update":
+            data = best_action.get("data", {})
+            target_id = best_action.get("target_id")
+            new_quantity = data.get("quantity", 1)
+            
+            # If target_id not provided, try to find by name
+            if not target_id and data.get("product_name"):
+                existing = find_matching_fridge_item(data["product_name"], payload.fridge)
+                if existing:
+                    target_id = existing.id
+            
+            if target_id:
+                return AIActionResponse(
+                    type="fridge_update",
+                    data={
+                        "itemId": target_id,
+                        "new_quantity": new_quantity,
+                    },
+                    message=parsed.get("message", f"Zaktualizować ilość do {new_quantity}?")
+                )
+        
+        elif action_type == "fridge_remove":
+            target_id = best_action.get("target_id")
+            if target_id:
+                return AIActionResponse(
+                    type="fridge_remove",
+                    data={"itemId": target_id},
+                    message=parsed.get("message", "Usunąć produkt z lodówki?")
+                )
+        
+        elif action_type == "shopping_add":
+            data = best_action.get("data", {})
+            item = {
                 "id": f"shopping-{uid()}",
-                "product_name": product_name,
-                "quantity": quantity,
-                "unit": unit,
+                "product_name": data.get("product_name", "Produkt"),
+                "quantity": data.get("quantity", 1),
+                "unit": data.get("unit", "szt"),
                 "purchased": False,
             }
-            proposals.append(
-                ProposedAction(
-                    id=f"propose-{uid()}",
-                    type="shopping_add",
-                    data=shopping_item,
-                    description=f"Dodać {product_name} do listy zakupów",
-                    icon="shopping",
+            return AIActionResponse(
+                type="propose",
+                data=[{
+                    "id": f"propose-{uid()}",
+                    "type": "shopping_add",
+                    "data": item,
+                    "description": f"Dodać {item['product_name']} do listy zakupów",
+                    "icon": "shopping"
+                }],
+                message=parsed.get("message", "Dodaję do listy zakupów.")
+            )
+        
+        elif action_type == "shopping_remove":
+            target_id = best_action.get("target_id")
+            if target_id:
+                return AIActionResponse(
+                    type="propose",
+                    data=[{
+                        "id": f"propose-{uid()}",
+                        "type": "shopping_remove",
+                        "data": {"itemId": target_id},
+                        "description": "Usunąć pozycję z listy zakupów",
+                        "icon": "shopping"
+                    }],
+                    message=parsed.get("message", "Usuwam z listy zakupów.")
                 )
+        
+        elif action_type == "meal_add":
+            data = best_action.get("data", {})
+            meal = {
+                "id": f"meal-{uid()}",
+                "day": date.today().isoformat(),
+                "meal_type": data.get("meal_type", "dinner"),
+                "name": data.get("name", "Nowy posiłek"),
+                "products": data.get("products", []),
+                "calories": data.get("calories", 500),
+                "macros": data.get("macros", {"protein": 30, "carbs": 50, "fat": 20}),
+            }
+            return AIActionResponse(
+                type="propose",
+                data=[{
+                    "id": f"propose-{uid()}",
+                    "type": "meal_add",
+                    "data": meal,
+                    "description": f"Zaplanować: {meal['name']}",
+                    "icon": "meal"
+                }],
+                message=parsed.get("message", "Planuję posiłek.")
             )
-
-    if intent == "meal_add":
-        meal_name = str(parsed.get("meal_name") or "Nowy posiłek").strip()
-        meal = {
-            "id": f"meal-{uid()}",
-            "day": date.today().isoformat(),
-            "meal_type": "dinner",
-            "name": meal_name,
-            "products": [{"product_name": p.get("product_name", "Produkt"), "quantity": float(p.get("quantity") or 1), "unit": p.get("unit") or "portion"} for p in items[:5]] or [{"product_name": "Produkt", "quantity": 1, "unit": "portion"}],
-            "calories": 500,
-            "macros": {"protein": 30, "carbs": 50, "fat": 20},
-        }
-        proposals.append(
-            ProposedAction(
-                id=f"propose-{uid()}",
-                type="meal_add",
-                data=meal,
-                description=f"Zaplanować posiłek: {meal_name}",
-                icon="meal",
+        
+        elif action_type == "suggest" or action_type == "question" or action_type == "clarify":
+            # Just return message without actions
+            return AIActionResponse(
+                type="unknown",
+                message=parsed.get("message", "Co mogę dla Ciebie zrobić?")
             )
+        
+        return AIActionResponse(
+            type="unknown",
+            message=parsed.get("message", "Rozumiem, ale nie jestem pewien jak pomóc.")
         )
-
-    if not proposals:
-        return AIActionResponse(type="unknown", message="Nie udało się wygenerować propozycji akcji.")
-
-    return AIActionResponse(type="propose", data=[p.model_dump() for p in proposals], message=message)
+        
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error: {e}")
+        return None
+    except Exception as e:
+        print(f"Error processing AI response: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return None
 
 
 @app.get("/health")
@@ -738,6 +946,189 @@ async def chat_action(payload: ChatActionRequest) -> AIActionResponse:
         print(traceback.format_exc())
         # Return fallback instead of crashing
         return fallback_chat_action(payload)
+
+
+# Dedicated fridge chat endpoint
+class FridgeChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class FridgeChatRequest(BaseModel):
+    message: str
+    fridge: list[FridgeItem]
+    language: Literal["en", "pl", "es", "de"] = "pl"
+    history: list[FridgeChatMessage] = Field(default_factory=list)
+
+
+class FridgeChatAction(BaseModel):
+    id: str
+    type: Literal["fridge_add", "fridge_update", "fridge_remove", "suggest"]
+    description: str
+    data: dict[str, Any] | None = None
+
+
+class FridgeChatResponse(BaseModel):
+    message: str
+    actions: list[FridgeChatAction] | None = None
+
+
+@app.post("/api/agents/fridge-chat", response_model=FridgeChatResponse)
+async def fridge_chat(payload: FridgeChatRequest) -> FridgeChatResponse:
+    """Dedicated fridge assistant - answers questions about fridge contents only."""
+    
+    # Build fridge-focused system prompt
+    language_names = {"pl": "Polish", "en": "English", "es": "Spanish", "de": "German"}
+    lang_name = language_names.get(payload.language, "English")
+    
+    system_prompt = f"""You are a dedicated FRIDGE ASSISTANT for ChefOS. Your ONLY job is to help users with their fridge/pantry.
+
+AVAILABLE TOPICS:
+- What products are in the fridge and their quantities
+- Which products are expiring soon or expired
+- Suggestions for using products before they expire
+- Organization and cleanup tips
+- What meals can be cooked with available ingredients
+
+RULES:
+1. ALWAYS respond in {lang_name} language
+2. If user asks about anything NOT related to fridge/food/pantry, politely redirect to fridge topics
+3. Be concise and helpful
+4. Check expiration dates and warn about expiring products
+5. Suggest actions when appropriate (add, update, remove products)
+
+WHEN USER ASKS FOR ACTIONS:
+- If they want to add/update/remove: return "actions" in your response
+- Action types: "fridge_add", "fridge_update", "fridge_remove", "suggest"
+
+Never hallucinate products that don't exist in the context."""
+
+    # Build rich fridge context
+    today = date.today()
+    fridge_analysis = []
+    
+    for item in payload.fridge:
+        exp_date = datetime.strptime(item.expiration_date, "%Y-%m-%d").date()
+        days_left = (exp_date - today).days
+        status = "expired" if days_left < 0 else "expiring_soon" if days_left <= 2 else "fresh"
+        
+        fridge_analysis.append({
+            "name": item.product_name,
+            "quantity": item.quantity,
+            "unit": item.unit,
+            "days_left": days_left,
+            "status": status,
+            "id": item.id,
+        })
+    
+    # Count by status
+    expired = [f for f in fridge_analysis if f["status"] == "expired"]
+    expiring = [f for f in fridge_analysis if f["status"] == "expiring_soon"]
+    fresh = [f for f in fridge_analysis if f["status"] == "fresh"]
+    
+    # Build user prompt with context
+    user_prompt = f"""USER QUESTION: "{payload.message}"
+
+CURRENT FRIDGE STATE:
+Total products: {len(payload.fridge)}
+- Expired: {len(expired)} ({', '.join([f["name"] for f in expired[:3]])})
+- Expiring soon (≤2 days): {len(expiring)} ({', '.join([f["name"] for f in expiring[:3]])})
+- Fresh: {len(fresh)}
+
+ALL PRODUCTS:
+{json.dumps(fridge_analysis, indent=2, ensure_ascii=False)}
+
+Respond with JSON in this format:
+{{
+  "message": "your friendly response in {lang_name}",
+  "actions": [
+    {{
+      "id": "action-1",
+      "type": "suggest|fridge_add|fridge_update|fridge_remove",
+      "description": "button text for user",
+      "data": {{...optional action data...}}
+    }}
+  ] or null if no actions needed
+}}"""
+    
+    try:
+        raw = await llm_chat(system_prompt, user_prompt, json_mode=True)
+        
+        if not raw:
+            return FridgeChatResponse(
+                message="Przepraszam, nie mogę teraz odpowiedzieć. Spróbuj ponownie." if payload.language == "pl" else "Sorry, I can't respond right now. Please try again."
+            )
+        
+        parsed = json.loads(raw)
+        
+        # Convert actions if present
+        actions = None
+        if "actions" in parsed and parsed["actions"]:
+            actions = [
+                FridgeChatAction(
+                    id=a.get("id", f"action-{i}"),
+                    type=a.get("type", "suggest"),
+                    description=a.get("description", "Action"),
+                    data=a.get("data"),
+                )
+                for i, a in enumerate(parsed["actions"])
+                if a.get("type") in ["fridge_add", "fridge_update", "fridge_remove", "suggest"]
+            ]
+        
+        return FridgeChatResponse(
+            message=parsed.get("message", "Rozumiem." if payload.language == "pl" else "I understand."),
+            actions=actions if actions else None,
+        )
+        
+    except Exception as e:
+        print(f"Fridge chat error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        
+        # Fallback: simple rule-based response
+        msg_lower = payload.message.lower()
+        
+        # Check for specific questions
+        if any(w in msg_lower for w in ["wygasa", "expires", "termin", "expiry"]):
+            if expiring:
+                product_names = ", ".join([f["name"] for f in expiring[:3]])
+                return FridgeChatResponse(
+                    message=f"Produkty wygasające w ciągu 2 dni: {product_names}" if payload.language == "pl" else f"Products expiring within 2 days: {product_names}",
+                    actions=[
+                        FridgeChatAction(
+                            id="view-expiring",
+                            type="suggest",
+                            description="Zobacz wszystkie wygasające" if payload.language == "pl" else "View all expiring",
+                        )
+                    ]
+                )
+            else:
+                return FridgeChatResponse(
+                    message="Brak produktów wygasających w ciągu 2 dni." if payload.language == "pl" else "No products expiring within 2 days.",
+                )
+        
+        elif any(w in msg_lower for w in ["ile", "how many", "count", "liczba"]):
+            return FridgeChatResponse(
+                message=f"W lodówce masz {len(payload.fridge)} produktów." if payload.language == "pl" else f"You have {len(payload.fridge)} products in the fridge.",
+            )
+        
+        elif any(w in msg_lower for w in ["ugotować", "cook", "obiad", "dinner", "przepis", "recipe"]):
+            if payload.fridge:
+                products = ", ".join([f["name"] for f in fresh[:5]])
+                return FridgeChatResponse(
+                    message=f"Możesz ugotować coś z: {products}" if payload.language == "pl" else f"You can cook with: {products}",
+                    actions=[
+                        FridgeChatAction(
+                            id="suggest-meals",
+                            type="suggest",
+                            description="Zobacz sugerowane posiłki" if payload.language == "pl" else "View suggested meals",
+                        )
+                    ]
+                )
+        
+        return FridgeChatResponse(
+            message="Jestem asystentem lodówkowym. Zapytaj o produkty, daty ważności lub co możesz ugotować!" if payload.language == "pl" else "I'm your fridge assistant. Ask about products, expiration dates, or what you can cook!",
+        )
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ export interface ProposedAction {
 
 export interface AIAction {
   type: 'fridge_add' | 'fridge_remove' | 'fridge_update' | 'meal_add' | 'meal_remove' | 'shopping_add' | 'shopping_remove' | 'shopping_toggle' | 'propose' | 'unknown';
-  data?: FridgeItem | Meal | ShoppingItem | { productName: string } | { mealId: string } | { itemId: string } | FridgeItem[] | ShoppingItem[] | ProposedAction[];
+  data?: FridgeItem | Meal | ShoppingItem | { productName: string } | { mealId: string } | { itemId: string } | { itemId: string; new_quantity: number } | FridgeItem[] | ShoppingItem[] | ProposedAction[];
   message: string;
 }
 
