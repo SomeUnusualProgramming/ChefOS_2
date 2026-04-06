@@ -132,9 +132,10 @@ const Index = () => {
         }
         break;
       case 'fridge_update':
-        if (action.data && 'id' in action.data) {
-          const item = action.data as FridgeItem;
-          store.updateFridgeItem(item.id, { expiration_date: item.expiration_date });
+        if (action.data && 'itemId' in action.data) {
+          const { itemId, new_quantity } = action.data as { itemId: string; new_quantity: number };
+          store.updateFridgeItem(itemId, { quantity: new_quantity });
+          toast.success(`Zaktualizowano ilość`);
         }
         break;
       case 'meal_add':
